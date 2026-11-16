@@ -116,6 +116,7 @@ RegisterNetEvent('whip_core:client:devTeleportToWaypoint', function()
     if landed then
         TriggerServerEvent('whip_core:server:devTeleportedToWaypoint', at.x, at.y, landed)
     end
+end)
 -- /car: into the driver's seat of the car the server just made (server/commands.lua). From the server only: other
 -- clients cannot send to this one. The car exists here only once it has streamed in, so it is waited for (5 s).
 RegisterNetEvent('whip_core:client:devSeatInCar', function(netId)
@@ -133,8 +134,8 @@ RegisterNetEvent('whip_core:client:devSeatInCar', function(netId)
     if veh == 0 or not DoesEntityExist(veh) then return end
 
     SetPedIntoVehicle(PlayerPedId(), veh, -1)
-end)
 
+end)
 --- For satellites: is developer mode on for this player? Only for what a client tool shows; the server's HasDevTools(source) is authoritative.
 exports('HasDevTools', function()
     return (DevToolsOn and DevToolsOn()) == true
