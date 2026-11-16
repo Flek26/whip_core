@@ -628,7 +628,7 @@ local function vehicleAdmin(source)
 end
 
 -- /car <model> — a temporary car at the admin's feet (SpawnTempVehicle): its key in their pockets, them in the
--- driver's seat. It goes like any temporary car: /dv, ten minutes with nobody near it, or a whip_core restart.
+-- driver's seat. It stays until /dv or a whip_core restart.
 devCommand('car', function(source, args)
     local admin, ped = vehicleAdmin(source)
     if not admin or not ped then return end
@@ -648,8 +648,9 @@ devCommand('car', function(source, args)
     CreateThread(function()
         local vehicleId, err = Vehicles.spawnTempFor(model, vector4(at.x, at.y, at.z, GetEntityHeading(ped)), {
             forSource = source,
-            giveKey   = true,
-            locked    = false,
+            giveKey     = true,
+            locked      = false,
+            idleDespawn = false,   -- stays until /dv or a restart, not removed after ten minutes left alone
         }, GetCurrentResourceName())
         if not vehicleId then
             ShowError(source, err or 'The car could not be spawned')
