@@ -10,14 +10,24 @@
 --- them to players who may run them.
 local DEV_COMMANDS = {}
 
+--- Chat help for the admin commands that have some: { name = '/car', help, params }, sent to admins only.
+local DEV_SUGGESTIONS = {}
+
 --- An admin command a player can type: allowed to the console and to whip.devtools.
 ---
 --- One permission: FiveM lets the command through (not `RegisterCommand(..., true)`, which gates on
 --- its own `command.<name>` ACE) and the handler asks whip.devtools, and says so when refused.
+---
+--- `suggestion` is the command's chat help, { help, params = { { name, help }, ... } }: shown in the chat's command
+--- suggestions to players with whip.devtools only, not to everyone (as a client-side chat:addSuggestion would be).
 ---@param name string
 ---@param fn fun(source: number, args: table, raw: string)
-local function devCommand(name, fn)
+---@param suggestion { help: string, params: { name: string, help: string }[]|nil }|nil
+local function devCommand(name, fn, suggestion)
     DEV_COMMANDS[name] = true
+    if suggestion then
+        DEV_SUGGESTIONS[#DEV_SUGGESTIONS + 1] = { name = '/' .. name, help = suggestion.help, params = suggestion.params }
+    end
     RegisterCommand(name, function(source, args, raw)
         if source ~= 0 and not DevTools.isAllowed(source) then
             ShowError(source, 'That command needs whip.devtools')
@@ -26,6 +36,15 @@ local function devCommand(name, fn)
         return fn(source, args, raw)
     end, false)
 end
+
+-- The admin commands' chat help, to each player with whip.devtools as their character loads (whip_chat keeps them
+-- for the session). Whether developer mode is on is the command's own check, when it runs.
+Character.onLife('loaded', function(e)
+    local src = e and e.source
+    if src and #DEV_SUGGESTIONS > 0 and DevTools.isEligible(src) then
+        TriggerClientEvent('chat:addSuggestions', src, DEV_SUGGESTIONS)
+    end
+end)
 
 --- Answer whoever ran the command: the console gets a print, a player a toast.
 ---@param source number
@@ -643,7 +662,10 @@ devCommand('car', function(source, args)
             x = at.x, y = at.y, z = at.z,
         })
     end)
-end)
+end, {
+    help   = 'Spawn a temporary vehicle, get its key and sit in it (admin)',
+    params = { { name = 'model', help = 'vehicle model, e.g. adder' } },
+})
 
 --- The car /dv takes: the one the admin is in, else the nearest within DV_RANGE in their routing bucket.
 ---@param source number
@@ -707,4 +729,6 @@ devCommand('dv', function(source)
         ShowSuccess(source, what)
         Log.write(admin.charId, 'admin_dv', { detail = '/dv: ' .. what, x = at.x, y = at.y, z = at.z })
     end)
-end)
+end, {
+    help = 'Remove the vehicle you are in, or the nearest within 5 m; an owned car goes to its garage (admin)',
+})
