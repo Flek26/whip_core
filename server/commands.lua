@@ -582,3 +582,129 @@ devCommand('whip_statebag', function(source, args)
         say(('  %-14s = %s | %s'):format(key, tostring(state[key]), tostring(Sentinel.getTruth(id, key))))
     end
 end)
+
+-- ============================================
+-- Vehicles: /car and /dv
+-- ============================================
+
+--- How near a car must be for /dv to take it when the admin is on foot (metres).
+local DV_RANGE = 5.0
+
+--- The admin who typed a vehicle command, or nil after telling them why not.
+---@param source number
+---@return WhipPlayer|nil player
+---@return number|nil ped
+local function vehicleAdmin(source)
+    if source == 0 then
+        print('[whip_core] This command works on your own character: run it in-game')
+        return nil, nil
+    end
+    local player = Players[source]
+    local ped = GetPlayerPed(source)
+    if not player or not ped or ped == 0 then
+        ShowError(source, 'No character loaded')
+        return nil, nil
+    end
+    return player, ped
+end
+
+-- /car <model> — a temporary car at the admin's feet (SpawnTempVehicle): its key in their pockets, them in the
+-- driver's seat. It goes like any temporary car: /dv, ten minutes with nobody near it, or a whip_core restart.
+devCommand('car', function(source, args)
+    local admin, ped = vehicleAdmin(source)
+    if not admin or not ped then return end
+
+    local model = args[1] and args[1]:lower() or ''
+    if model == '' or #model > 60 or not model:match('^[%w_]+$') then
+        ShowError(source, 'Usage: /car <model>, e.g. /car adder')
+        return
+    end
+    if GetVehiclePedIsIn(ped, false) ~= 0 then
+        ShowError(source, 'Get out of your vehicle first (or /dv it)')
+        return
+    end
+
+    local at = GetEntityCoords(ped)
+    -- In a thread: giving the key may wait on the inventory, and a command handler should not.
+    CreateThread(function()
+        local vehicleId, err = Vehicles.spawnTempFor(model, vector4(at.x, at.y, at.z, GetEntityHeading(ped)), {
+            forSource = source,
+            giveKey   = true,
+            locked    = false,
+        }, GetCurrentResourceName())
+        if not vehicleId then
+            ShowError(source, err or 'The car could not be spawned')
+            return
+        end
+
+        TriggerClientEvent('whip_core:client:devSeatInCar', source, Vehicles.getNetId(vehicleId))
+        Log.write(admin.charId, 'admin_car', {
+            detail = ('/car %s (temporary vehicle #%d)'):format(model, vehicleId),
+            x = at.x, y = at.y, z = at.z,
+        })
+    end)
+end)
+
+--- The car /dv takes: the one the admin is in, else the nearest within DV_RANGE in their routing bucket.
+---@param source number
+---@param ped number
+---@return number|nil entity
+local function dvTarget(source, ped)
+    local inside = GetVehiclePedIsIn(ped, false)
+    if inside ~= 0 then return inside end
+
+    local at, bucket = GetEntityCoords(ped), GetPlayerRoutingBucket(source)
+    local best, bestDist = nil, DV_RANGE
+    for _, veh in ipairs(GetAllVehicles()) do
+        if GetEntityRoutingBucket(veh) == bucket then
+            local d = #(GetEntityCoords(veh) - at)
+            if d <= bestDist then best, bestDist = veh, d end
+        end
+    end
+    return best
+end
+
+-- /dv — remove the car the admin is in, or the nearest one within 5 m. Through whip when it is one of whip's: someone's
+-- own car goes back to its garage (record and boot intact), a temporary car is removed for good (its key taken back).
+-- A car whip does not know (traffic, another resource's) is deleted.
+devCommand('dv', function(source)
+    local admin, ped = vehicleAdmin(source)
+    if not admin or not ped then return end
+
+    local entity = dvTarget(source, ped)
+    if not entity then
+        ShowError(source, ('No vehicle within %d m'):format(math.floor(DV_RANGE)))
+        return
+    end
+
+    local at = GetEntityCoords(entity)
+    local vehicleId = Vehicles.getEntityVehicleId(entity)
+    local def = vehicleId and Vehicles.getDef(vehicleId)
+
+    -- In a thread: putting an owned car away waits on its garage save.
+    CreateThread(function()
+        local what
+        if vehicleId and def then
+            local ok, err = Vehicles.despawnByRef(vehicleId)
+            if not ok then
+                ShowError(source, ('Vehicle #%d could not be removed: %s'):format(vehicleId, tostring(err)))
+                return
+            end
+            if def.temp then
+                what = ('Temporary vehicle #%d removed'):format(vehicleId)
+            elseif def.session then
+                what = ('Street vehicle #%d deleted'):format(vehicleId)
+            else
+                what = ('Vehicle #%d put away in its garage'):format(vehicleId)
+            end
+        else
+            what = 'Vehicle deleted'
+        end
+
+        -- A street car whip let go of is handed back to GTA, still standing there; an unknown one was never whip's.
+        if DoesEntityExist(entity) and (not def or def.session) then DeleteEntity(entity) end
+
+        ShowSuccess(source, what)
+        Log.write(admin.charId, 'admin_dv', { detail = '/dv: ' .. what, x = at.x, y = at.y, z = at.z })
+    end)
+end)
