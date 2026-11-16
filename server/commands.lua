@@ -143,6 +143,47 @@ local function GetPlayerByCharId(charId)
     return nil, nil
 end
 
+--- The give behind whip_giveitem and giveitem, once the target is found. Answers the admin itself.
+---@param source number    who ran the command (0 = console)
+---@param cmd string       the command's name, for the log
+---@param player WhipPlayer
+---@param playerSrc number
+---@param item string
+---@param amount number
+local function GiveItemByCommand(source, cmd, player, playerSrc, item, amount)
+    amount = math.floor(amount)
+    if amount < 1 then
+        reply(source, 'Count must be 1 or more', 'error')
+        return
+    end
+
+    if not player.inventory then
+        reply(source, 'That player has no inventory loaded', 'error')
+        return
+    end
+
+    if not Config.Items[item] then
+        reply(source, 'Unknown item: ' .. item, 'error')
+        return
+    end
+
+    -- A give: through Inventory.giveOrDrop, so a full inventory drops at their feet rather than making
+    -- the console say "Failed" while the admin wonders where the item went. It also does the sync
+    -- (serialize, weights, item:added) that used to be hand-rolled here.
+    local ok, err, placement = Inventory.giveOrDrop(playerSrc, player, item, amount, nil, {
+        container = 'player',
+        reason    = ('admin command %s, run by %s'):format(cmd,
+            source == 0 and 'the console' or (GetPlayerName(source) or ('#' .. source))),
+    })
+    if ok then
+        reply(source, ('Gave %dx %s to %s (id: %d, charId: %d)%s'):format(
+            amount, item, player.fullName, playerSrc, player.charId,
+            placement == 'ground' and ' — INVENTORY FULL, dropped at their feet' or ''), 'success')
+    else
+        reply(source, ('Failed: %s'):format(err or 'Unknown error'), 'error')
+    end
+end
+
 -- /whip_giveitem [charId] <item> [amount] — Give an item to a player; with no charId, to yourself
 -- A number first is a charId; anything else is the item.
 devCommand('whip_giveitem', function(source, args)
@@ -176,32 +217,27 @@ devCommand('whip_giveitem', function(source, args)
     end
     ---@cast playerSrc -nil
 
-    if not player.inventory then
-        reply(source, 'That player has no inventory loaded', 'error')
+    GiveItemByCommand(source, 'whip_giveitem', player, playerSrc, item, amount)
+end)
+
+-- /giveitem <id> <item> [count] — Give an item to a player by server ID (the id the admin menu and
+-- scoreboard show). Same permission and same give as whip_giveitem.
+devCommand('giveitem', function(source, args)
+    local targetId, item = tonumber(args[1]), args[2]
+    local amount = tonumber(args[3]) or 1
+
+    if not targetId or not item then
+        reply(source, 'Usage: /giveitem <id> <item> [count]', 'error')
         return
     end
 
-    if not Config.Items[item] then
-        reply(source, 'Unknown item: ' .. item, 'error')
+    local player = Players[targetId]
+    if not player or player.phantom then
+        reply(source, ('No player with id %d has a character loaded'):format(targetId), 'error')
         return
     end
 
-    -- A give: through Inventory.giveOrDrop, so a full inventory drops at their feet rather than making
-    -- the console say "Failed" while the admin wonders where the item went. This also drops
-    -- fifteen lines of hand-rolled sync — a serialize, a weights table built by naming
-    -- containers, and a manual item:added — all of which Inventory.giveOrDrop does, and one of which
-    -- (the weights literal) was a container list in disguise waiting to go stale.
-    local ok, err, placement = Inventory.giveOrDrop(playerSrc, player, item, amount, nil, {
-        container = 'player',
-        reason    = 'admin command whip_giveitem, run by ' .. (source == 0 and 'the console' or (GetPlayerName(source) or ('#' .. source))),
-    })
-    if ok then
-        reply(source, ('Gave %dx %s to %s (charId: %d)%s'):format(
-            amount, item, player.fullName, charId,
-            placement == 'ground' and ' — INVENTORY FULL, dropped at their feet' or ''), 'success')
-    else
-        reply(source, ('Failed: %s'):format(err or 'Unknown error'), 'error')
-    end
+    GiveItemByCommand(source, 'giveitem', player, targetId, item, amount)
 end)
 
 -- /whip_removeitem <charId> <item> [amount] — Remove an item from a player
