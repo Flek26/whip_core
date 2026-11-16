@@ -582,3 +582,128 @@ devCommand('whip_statebag', function(source, args)
         say(('  %-14s = %s | %s'):format(key, tostring(state[key]), tostring(Sentinel.getTruth(id, key))))
     end
 end)
+
+-- ============================================
+-- Teleports: /tp and /tpm
+-- ============================================
+--
+-- The server decides and logs; the admin's own client moves them (client/dev_commands.lua), behind a fade and onto
+-- the ground when no height was given. Each lands on the admin's activity log with where they went.
+
+--- Out of these bounds is off GTA's map: refused rather than dropping the admin into the void.
+local TP_MAX_XY, TP_MIN_Z, TP_MAX_Z = 10000.0, -200.0, 2700.0
+
+--- The numbers in what was typed after /tp, however they were pasted: `1 2 3`, `1, 2, 3`, `vector3(1, 2, 3)`,
+--- `vec4(1.0, 2.0, 3.0, 90.0)`. Nil when anything else is in there (a typo should not teleport).
+---@param raw string the whole line, command name included
+---@return number[]|nil
+local function tpNumbers(raw)
+    local rest = raw:gsub('^%S+', '')               -- without "tp"
+    rest = rest:gsub('vec%a*%d?', ' ')               -- vector3 / vec3 / vec4: their digit is not a coordinate
+    rest = rest:gsub('[,()]', ' ')
+    local out = {}
+    for word in rest:gmatch('%S+') do
+        local n = tonumber(word)
+        if not n or n ~= n or n == math.huge or n == -math.huge then return nil end
+        out[#out + 1] = n
+    end
+    return out
+end
+
+--- The admin who typed a teleport, or nil after telling them why not.
+---@param source number
+---@return WhipPlayer|nil
+local function tpAdmin(source)
+    if source == 0 then
+        print('[whip_core] Teleports move your own character: run this in-game')
+        return nil
+    end
+    local player = Players[source]
+    if not player then
+        ShowError(source, 'No character loaded')
+        return nil
+    end
+    return player
+end
+
+-- /tp <x> <y> [z] [heading]  — to coordinates; with no z, onto the ground there
+-- /tp <id>                   — to a player (server id), in the same routing bucket
+devCommand('tp', function(source, _, raw)
+    local admin = tpAdmin(source)
+    if not admin then return end
+
+    local n = tpNumbers(raw or '')
+    if not n or #n == 0 or #n > 4 then
+        ShowError(source, 'Usage: /tp <x> <y> [z] [heading], or /tp <player id>')
+        return
+    end
+
+    -- One whole number: a player.
+    if #n == 1 then
+        local targetId = n[1]
+        if math.type(targetId) ~= 'integer' then
+            ShowError(source, 'Usage: /tp <x> <y> [z] [heading], or /tp <player id>')
+            return
+        end
+        if targetId == source then
+            ShowError(source, 'That is you')
+            return
+        end
+        local ped = GetPlayerName(targetId) and GetPlayerPed(targetId) or 0
+        if not ped or ped == 0 then
+            ShowError(source, ('No player with id %d is in the world'):format(targetId))
+            return
+        end
+        -- A teleport does not cross worlds: they would be next to you in a world you are not in.
+        if GetPlayerRoutingBucket(targetId) ~= GetPlayerRoutingBucket(source) then
+            ShowError(source, 'They are in another world (routing bucket)')
+            return
+        end
+
+        local at = GetEntityCoords(ped)
+        TriggerClientEvent('whip_core:client:devTeleport', source, at.x, at.y, at.z, nil)
+        Log.write(admin.charId, 'teleport', {
+            detail = ('/tp to %s [%d]'):format(GetPlayerName(targetId), targetId),
+            x = at.x, y = at.y, z = at.z,
+        })
+        return
+    end
+
+    local x, y, z, heading = n[1] + 0.0, n[2] + 0.0, n[3] and n[3] + 0.0, n[4] and n[4] + 0.0
+    if math.abs(x) > TP_MAX_XY or math.abs(y) > TP_MAX_XY or (z and (z < TP_MIN_Z or z > TP_MAX_Z)) then
+        ShowError(source, 'Those coordinates are off the map')
+        return
+    end
+
+    TriggerClientEvent('whip_core:client:devTeleport', source, x, y, z, heading)
+    Log.write(admin.charId, 'teleport', {
+        detail = z and ('/tp to %.1f, %.1f, %.1f'):format(x, y, z) or ('/tp to %.1f, %.1f (ground)'):format(x, y),
+        x = x, y = y, z = z,
+    })
+end)
+
+-- /tpm — to the admin's map waypoint, onto the ground. The waypoint lives only on their client, so the client reads
+-- it and says where it went (whip_core:server:devTeleportedToWaypoint), which is what gets logged.
+devCommand('tpm', function(source)
+    if not tpAdmin(source) then return end
+    TriggerClientEvent('whip_core:client:devTeleportToWaypoint', source)
+end)
+
+--- The client's report of where /tpm put them: for the log only, so it moves nobody. A client sending it without /tpm
+--- writes a false row about itself at most, and only with whip.devtools.
+SecureEvent('whip_core:server:devTeleportedToWaypoint', {
+    rateLimit = 1000,
+    ace       = 'whip.devtools',
+    params    = {
+        { 'x', 'number', -TP_MAX_XY, TP_MAX_XY },
+        { 'y', 'number', -TP_MAX_XY, TP_MAX_XY },
+        { 'z', 'number', TP_MIN_Z, TP_MAX_Z },
+    },
+}, function(source, _, x, y, z)
+    local admin = Players[source]
+    if not admin then return end
+    Log.write(admin.charId, 'teleport', {
+        detail = ('/tpm to their waypoint (%.1f, %.1f, %.1f)'):format(x, y, z),
+        x = x, y = y, z = z,
+    })
+end)
