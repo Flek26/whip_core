@@ -1517,6 +1517,7 @@ end)
 -- Garage blips. The single-garage sync events touch only their own blip; only the full garagesSync rebuilds all.
 local function removeGarageBlip(key)
     local blip = garageBlips[key]
+    if blip then WhipBlipSetLabel(blip, nil) end
     if blip and DoesBlipExist(blip) then RemoveBlip(blip) end
     garageBlips[key] = nil
 end
@@ -1533,6 +1534,7 @@ local function createGarageBlip(key, g)
     BeginTextCommandSetBlipName('STRING')
     AddTextComponentSubstringPlayerName(g.name or 'Garage')
     EndTextCommandSetBlipName(blip)
+    WhipBlipSetLabel(blip, g.name or 'Garage')   -- for the pause map's legend (GTA can't read it back)
     garageBlips[key] = blip
 end
 
