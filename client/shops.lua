@@ -111,6 +111,8 @@ local function CreateShopBlip(data)
     BeginTextCommandSetBlipName('STRING')
     AddTextComponentSubstringPlayerName(data.name or 'Shop')
     EndTextCommandSetBlipName(blip)
+    -- GTA can't read a blip's name back: the pause map's legend asks client/blips.lua for it.
+    WhipBlipSetLabel(blip, data.name or 'Shop')
 
     shopBlips[data.shopId] = blip
 end
@@ -118,6 +120,7 @@ end
 local function RemoveShopBlip(shopId)
     local blip = shopBlips[shopId]
     if blip then
+        WhipBlipSetLabel(blip, nil)
         if DoesBlipExist(blip) then
             RemoveBlip(blip)
         end
