@@ -291,7 +291,18 @@ end
 exports('RegisterItemFlag', Inventory.registerItemFlag)
 exports('HasItemFlag', Inventory.hasItemFlag)
 
---- Does the player hold the item? A number in place of the filter is a minimum amount.
+-- What stays the player's inside a holder (a bank card in a wallet): the rule the server sent with the item
+-- definitions (shared/inventory_shape.lua EachCarriedInside).
+local function holdOf(holderItem)
+    local def = Config.Items[holderItem]
+    return def and def.holds or nil
+end
+local function countsInside(holderItem, item)
+    local def = Config.Items[item]
+    return def ~= nil and type(def.insideOf) == 'table' and def.insideOf[holderItem] == true
+end
+
+--- Does the player hold the item? A number in place of the filter is a minimum amount. A wallet's cards count.
 --- @param itemKey string
 --- @param filter function|number|nil   Optional metadata filter, or a minimum amount
 --- @return boolean
@@ -314,10 +325,15 @@ function hasItem(itemKey, filter)
             end
         end
     end
-    return false
+    local found = false
+    EachCarriedInside(_cachedInventory, itemKey, holdOf, countsInside, function(_, _, _, data)
+        found = not filter or not not filter(data.metadata)
+        return found
+    end)
+    return found
 end
 
---- Count an item across all containers (a number in the filter's place is ignored).
+--- Count an item across all containers, a wallet's cards too (a number in the filter's place is ignored).
 --- @param itemKey string
 --- @param filter function|nil   Optional metadata filter
 --- @return number
@@ -342,6 +358,9 @@ function Inventory.getItemCount(itemKey, filter)
             end
         end
     end
+    EachCarriedInside(_cachedInventory, itemKey, holdOf, countsInside, function(_, _, _, data)
+        if not filter or filter(data.metadata) then count = count + (tonumber(data.amount) or 1) end
+    end)
     return count
 end
 
@@ -671,6 +690,12 @@ AddEventHandler('whip_core:player:died', function()
     if invOpen then Inventory.close() end
 end)
 
+-- So does a logout: its focus outlived character select, and the next character came in with the last one's
+-- inventory on screen.
+AddEventHandler('whip_core:player:logout', function()
+    if invOpen then Inventory.close() end
+end)
+
 -- Satellite UIs: resources that declared their own screen open, so IsAnyUIOpen covers them.
 -- Keyed from the calling resource (Registry.caller) and dropped when it stops.
 --- [resource] = { [key] = { keepHud = bool } }; a resource with one screen passes no key.
@@ -784,8 +809,12 @@ exports('IsAnyScreenOpen', IsAnyScreenOpen)
 function IsGameInputFree(forPrompts, exceptBar, forHotbar)
     local busy = UI ~= nil and UI.IsBusy ~= nil and UI.IsBusy()
         and not (exceptBar and UI.IsProgressActive ~= nil and UI.IsProgressActive())
-    -- An editor with its own prompt group (Interactions.setSolo) is not a screen for the prompts' question.
-    if forPrompts and Interactions ~= nil and Interactions.getSolo ~= nil and Interactions.getSolo() ~= nil then
+    -- An editor with its own prompt group (Interactions.setSolo), or an admin mode that leaves the world's prompts up
+    -- (PropertyEditor.start{ prompts = true }), is not a screen for the prompts' question.
+    local editorLeavesPrompts = forPrompts and (
+        (Interactions ~= nil and Interactions.getSolo ~= nil and Interactions.getSolo() ~= nil)
+        or (PropertyEditor ~= nil and PropertyEditor.promptsUp ~= nil and PropertyEditor.promptsUp()))
+    if editorLeavesPrompts then
         if screensOpen(true) or busy then return false end
     elseif screensOpen() or busy then
         return false
@@ -915,6 +944,10 @@ local function adoptServerItemDefs(defs)
         if type(def) == 'table' and (have == nil or have._fromServer) then
             def._fromServer = true
             Config.Items[key] = def
+        elseif type(def) == 'table' then
+            -- A config item keeps its own entry, but takes the server's rule for what stays the player's inside a
+            -- holder (shared/inventory_shape.lua): only the server knows the panel registrations.
+            have.holds, have.insideOf = def.holds, def.insideOf
         end
     end
 end
@@ -1850,8 +1883,14 @@ end)
 --- Reported once per item, not per use.
 local propWarned = {}
 
+--- Item props the game threw on when asked for (LoadModel's 'error'). Seen with whip_gunny's add-on weapon models
+--- (w_<type>_whip_<gun>), which the game knows only as a weapon's: requested as a prop, it throws. The default box
+--- stands in for them from then on, on the ground, in a throw and in the hand alike.
+local badProps = {}
+
 --- Which prop model stands for this item, dropped in the world or offered in the hand.
---- A model missing from this client's archives (IsModelInCdimage) would time out, so it falls back to Config.DefaultGroundProp.
+--- A model missing from this client's archives (IsModelInCdimage) would time out, so it falls back to Config.DefaultGroundProp,
+--- as does one the game threw on (Inventory.loadItemProp).
 ---@param itemKey string
 ---@return string
 function Inventory.itemPropModel(itemKey)
@@ -1859,6 +1898,7 @@ function Inventory.itemPropModel(itemKey)
     local want = def and def.prop or nil
 
     if want then
+        if badProps[want] then return Config.DefaultGroundProp end
         if IsModelInCdimage(GetHashKey(want)) then return want end
 
         if not propWarned[itemKey] then
@@ -1870,6 +1910,26 @@ function Inventory.itemPropModel(itemKey)
     end
 
     return Config.DefaultGroundProp
+end
+
+--- An item's prop, loaded: its own, or Config.DefaultGroundProp when its own is missing or the game throws loading
+--- it (then the box for the session, said once). Answers the hash, or nil when it did not load in `ms`, and the model
+--- name either way. Waits up to `ms` (from a thread); 0 asks for it without waiting, for one wanted shortly.
+---@param itemKey string
+---@param ms number|nil
+---@return number|nil hash
+---@return string name
+function Inventory.loadItemProp(itemKey, ms)
+    local name = Inventory.itemPropModel(itemKey)
+    local hash, why = LoadModel(name, ms)
+    if not hash and why == 'error' and name ~= Config.DefaultGroundProp then
+        badProps[name] = true
+        print(('[whip_core:items] item "%s" stands as %s: the game would not load its prop, %s')
+            :format(tostring(itemKey), tostring(Config.DefaultGroundProp), tostring(name)))
+        name = Config.DefaultGroundProp
+        hash = LoadModel(name, ms)
+    end
+    return hash, name
 end
 
 --- The offered item in the hand is a server-made held prop (like an emote's bottle), shown a moment after give mode starts.
@@ -1907,13 +1967,13 @@ local function giveHandNow()
 end
 
 local function AskForHandProp()
-    local modelName = Inventory.itemPropModel(giveItemKey)
+    -- Asked for now, not waited on (a throw finds it loaded): its own model, or the box when the game throws on it
+    local _, modelName = Inventory.loadItemProp(giveItemKey, 0)
     if not modelName then return end
     modelName = modelName:lower()
     if giveProp then SetModelAsNoLongerNeeded(giveProp) end   -- an earlier give's, not let go yet
     giveProp = GetHashKey(modelName)
     giveHand = giveHandNow()
-    RequestModel(giveProp)
     TriggerServerEvent('whip_core:server:giveHold', giveContainer, giveSlot, modelName, giveHand)
 end
 
@@ -2052,6 +2112,12 @@ local function CancelGiveMode()
     giveRayLastCheck = 0
 end
 
+-- A logout ends give mode: for up to GIVE_TIMEOUT after character select, E gave from the next character's
+-- inventory at the slot this one picked.
+AddEventHandler('whip_core:player:logout', function()
+    if giveMode then CancelGiveMode() end
+end)
+
 -- Forward-declared: the give tick lives below its raycast helper.
 local startGiveTick
 
@@ -2146,6 +2212,8 @@ end)
 -- Knocked over by a thrown item (Config.ThrowKnockdown). The item is not a GTA projectile, so the hit is looked for here:
 --   * a player is knocked down by their own game when the item reaches them on screen (watchThrows);
 --   * the thrower's game runs the flight, bounces the item off whoever it hits and knocks down people of the street.
+-- A script's throw (ThrowGroundItem) has no thrower: the player whose game flies it is hit like anyone else.
+-- What knocks someone over is weight and speed together (hitsHard): a fast coin does not, a slow rock does not.
 
 local KNOCK_AHEAD  = 0.4   -- metres the hit ray runs past where the item got to (and half the item's size: its tip hits first)
 local KNOCK_PUSH   = 0.1   -- of the item's speed, the shove the way it flew: about 2 m/s from a throw, a nudge into the fall
@@ -2155,6 +2223,17 @@ local KNOCK_BOUNCE = 0.2   -- of the item's speed, how fast it comes back off a 
 local KNOCK_REACH  = 0.65
 local WATCH_RANGE  = 30.0  -- metres: a flying throw further than this from you is not looked at
 local WATCH_MAX_MS = 15000 -- a throw still "flying" after this is forgotten (its landing never reached this game)
+local KG_WAIT_MS   = 1000  -- a hit before the throw's weight reached this game waits this long for it (watchThrows)
+
+--- Hard enough to knock someone over: fast enough (MinSpeed) and heavy enough for that speed, its weight (kg) times its
+--- speed (m/s) at least MinImpact. A weight not known says no.
+---@param kg number|nil
+---@param speed number
+local function hitsHard(kg, speed)
+    local cfg = Config.ThrowKnockdown
+    if speed < (tonumber(cfg.MinSpeed) or 8.0) then return false end
+    return (tonumber(kg) or 0) * speed >= (tonumber(cfg.MinImpact) or 8.0)
+end
 
 --- Down for Config.ThrowKnockdown.RagdollMs, shoved the way the item flew. Not someone already down, in a car, or who cannot fall. The ped must be this game's.
 local function knockDown(ped, dx, dy, dz, speed)
@@ -2179,9 +2258,23 @@ local function knockDownNpc(ped, dx, dy, dz, speed)
     end)
 end
 
+local KNOCK_GRACE_MS = 1500   -- after getting up, this long before another throw can knock this player down
+local knockedUntil = 0        -- GetGameTimer() before which this player cannot be knocked down again
+
+--- This player knocked down by a throw. Not while dead, held in place by whip (frozen, hidden, no collision), or
+--- invincible (no-PvP zone, god mode); not again until back up KNOCK_GRACE_MS.
+local function knockMeDown(dx, dy, dz, speed)
+    if PlayerIsDead or PedHold.wants('frozen') or PedHold.wants('hidden') or PedHold.wants('noCollision')
+        or PedHold.wants('invincible') then return end
+    local now = GetGameTimer()
+    if now < knockedUntil then return end
+    knockedUntil = now + math.floor(tonumber(Config.ThrowKnockdown.RagdollMs) or 2500) + KNOCK_GRACE_MS
+    knockDown(PlayerPedId(), dx, dy, dz, speed)
+end
+
 --- The thrower's game, one frame of a flying throw: did it fly into someone? A ray along its path since the last frame,
---- people only, judged on the speed before this frame. It bounces back; a person of the street falls.
---- `k` is the throw's own { pos, vel, hit = { [ped] = true } }, each person once.
+--- people only, judged on the speed before this frame. It bounces back; a person of the street falls when it hit
+--- hard enough (hitsHard). `k` is the throw's own { pos, vel, kg, hit = { [ped] = true } }, each person once.
 local function throwHitCheck(obj, vel, k)
     local cfg = Config.ThrowKnockdown
     if not cfg or cfg.Enabled == false then return end
@@ -2199,21 +2292,31 @@ local function throwHitCheck(obj, vel, k)
         last.x, last.y, last.z, pos.x + dx * ahead, pos.y + dy * ahead, pos.z + dz * ahead,
         1 + 2 + 8 + 16, obj, 4))
     if hit ~= 1 or not ped or ped == 0 or k.hit[ped] or not DoesEntityExist(ped) or not IsEntityAPed(ped) then return end
-    if ped == PlayerPedId() then return end
+    -- Not off its own thrower. A script's throw (k.hitsMe) has none: this player only flies it, so it comes off them as
+    -- off anyone and knocks them down (here: the bounce below would take it off them before watchThrows saw it reach).
+    local me = ped == PlayerPedId()
+    if me and not k.hitsMe then return end
     -- Not off someone nobody can see (an invisible admin keeps collision).
-if not IsEntityVisible(ped) then return end
+    if not IsEntityVisible(ped) then return end
     k.hit[ped] = true
     -- Off them, not through: back to where it met them, slowly and falling
     SetEntityCoordsNoOffset(obj, hitPos.x - dx * 0.2, hitPos.y - dy * 0.2, hitPos.z - dz * 0.2, false, false, false)
     local back = speed * KNOCK_BOUNCE
     SetEntityVelocity(obj, -dx * back, -dy * back, math.min(lastVel.z, 0.0) - 1.0)
     k.pos, k.vel = nil, nil   -- the next frame starts afresh from where it was put
-    if not IsPedAPlayer(ped) and cfg.Npcs ~= false then knockDownNpc(ped, dx, dy, dz, speed) end
+    if not hitsHard(k.kg, speed) then return end
+    if me then
+        knockMeDown(dx, dy, dz, speed)
+    elseif not IsPedAPlayer(ped) and cfg.Npcs ~= false then
+        knockDownNpc(ped, dx, dy, dz, speed)
+    end
 end
 
 -- Every game: the flying throws near its own player (ground.lua names them as they launch)
 
-local watched = {}   -- [netId] = { since, thrower (a player index), pos, vel, done }
+-- [netId] = { since, thrower (a player index), kg, pos, vel, done, hit, mine }. `mine`: a script's throw this game
+-- flies (TrackThrow), watched for this player too. `hit`: it reached this player, judged once its weight is known.
+local watched = {}
 local watchRunning = false
 
 --- The nearest two points of segments AB and CD are within `r` of each other? (Each a pair of vector3s.)
@@ -2238,21 +2341,9 @@ local function segmentsWithin(a, b, c, d, r)
     return px * px + py * py + pz * pz <= r * r
 end
 
-local KNOCK_GRACE_MS = 1500   -- after getting up, this long before another throw can knock this player down
-local knockedUntil = 0        -- GetGameTimer() before which this player cannot be knocked down again
-
---- This player knocked down by a throw. Not while dead, held in place by whip (frozen, hidden, no collision), or
---- invincible (no-PvP zone, god mode); not again until back up KNOCK_GRACE_MS.
-local function knockMeDown(dx, dy, dz, speed)
-    if PlayerIsDead or PedHold.wants('frozen') or PedHold.wants('hidden') or PedHold.wants('noCollision')
-        or PedHold.wants('invincible') then return end
-    local now = GetGameTimer()
-    if now < knockedUntil then return end
-    knockedUntil = now + math.floor(tonumber(Config.ThrowKnockdown.RagdollMs) or 2500) + KNOCK_GRACE_MS
-    knockDown(PlayerPedId(), dx, dy, dz, speed)
-end
-
---- Each frame while throws fly near: has one, flying fast, passed through this player's body? Not their own throw. Each throw once.
+--- Each frame while throws fly near: has one, flying fast, passed through this player's body? Not their own throw. Each
+--- throw once. Down only when it hit hard enough for its weight (hitsHard); a hit before its weight is known here (a
+--- player's own throw: its pile brings the weight a moment after the throw is named) waits KG_WAIT_MS for it.
 local function watchThrows()
     if watchRunning then return end
     watchRunning = true
@@ -2267,11 +2358,20 @@ local function watchThrows()
             for netId, w in pairs(watched) do
                 if now - w.since > WATCH_MAX_MS then
                     watched[netId] = nil
+                elseif w.hit then
+                    local h = w.hit
+                    if w.kg ~= nil then
+                        w.hit = nil
+                        if hitsHard(w.kg, h.speed) then knockMeDown(h.dx, h.dy, h.dz, h.speed) end
+                    elseif now - h.at > KG_WAIT_MS then
+                        w.hit = nil
+                    end
                 elseif not w.done and cfg and cfg.Enabled ~= false and NetworkDoesNetworkIdExist(netId) then
                     local obj = NetToObj(netId)
                     -- Only an object (never a car or person) that the thrower's game runs: the id came from them, so a made-up id cannot name someone else's prop.
+                    -- Never this player's own throw, but a script's that this game flies, yes (`mine`).
                     if obj ~= 0 and DoesEntityExist(obj) and GetEntityType(obj) == 3
-                        and NetworkGetEntityOwner(obj) == w.thrower and not NetworkHasControlOfEntity(obj) then
+                        and NetworkGetEntityOwner(obj) == w.thrower and (w.mine or not NetworkHasControlOfEntity(obj)) then
                         local pos = GetEntityCoords(obj)
                         if #(pos - me) > WATCH_RANGE then
                             w.pos, w.vel = nil, nil
@@ -2286,7 +2386,9 @@ local function watchThrows()
                                     pos.x, pos.y, pos.z, me.x, me.y, me.z, 1, obj, 4))
                                 if blocked ~= 1 then
                                     w.done = true
-                                    knockMeDown(lastVel.x / speed, lastVel.y / speed, lastVel.z / speed, speed)
+                                    -- Judged on its weight, now or when the weight comes (above)
+                                    w.hit = { dx = lastVel.x / speed, dy = lastVel.y / speed, dz = lastVel.z / speed,
+                                              speed = speed, at = now }
                                 end
                             end
                         end
@@ -2299,15 +2401,23 @@ local function watchThrows()
     end)
 end
 
---- A throw was launched; watched until it lands. No thrower, no watch.
+--- A throw was launched; watched until it lands. No thrower, no watch. `kg`, what it weighs, as the server says it
+--- (with the launch for a script's throw, with the pile for a player's own); named again later, it is kept.
 ---@param netId number|nil
 ---@param throwerServerId number|string|nil
-function Inventory.watchThrow(netId, throwerServerId)
+---@param kg number|nil
+function Inventory.watchThrow(netId, throwerServerId, kg)
     throwerServerId = tonumber(throwerServerId)
-    if not netId or not throwerServerId or watched[netId] then return end
+    kg = tonumber(kg)
+    if not netId or not throwerServerId then return end
+    local w = watched[netId]
+    if w then
+        if kg then w.kg = kg end
+        return
+    end
     -- The thrower as this game knows them (nil when not here)
     local thrower = GetPlayerFromServerId(throwerServerId)
-    watched[netId] = { since = GetGameTimer(), thrower = thrower ~= -1 and thrower or nil }
+    watched[netId] = { since = GetGameTimer(), thrower = thrower ~= -1 and thrower or nil, kg = kg }
     watchThrows()
 end
 
@@ -2317,49 +2427,76 @@ function Inventory.unwatchThrow(netId)
     if netId then watched[netId] = nil end
 end
 
--- Where a throw goes
+-- Where a throw goes: aimed by ThrowAim (shared/throw_aim.lua), the rule a script's throw shares.
 
-local THROW_SPEED   = 18.0   -- m/s as it leaves the hand
-local THROW_LOFT    = 2.5    -- m/s up, added to a throw at nothing in reach (every throw's arc, before)
+local THROW_SPEED   = 18.0   -- m/s as it leaves the hand: a player's power
 -- The tumble a thrown thing leaves the hand with: a random turn about each axis within these bounds (radians a second, either way). It never changes the path.
 local THROW_TWIST_MIN = 0.8
 local THROW_TWIST_MAX = 4.0
-local THROW_GRAVITY = 9.81
 
---- The velocity that carries a throw from `from` to land on `to` at THROW_SPEED, on the low (flatter) arc. nil when out of reach or straight above or below.
----@return number|nil vx, number|nil vy, number|nil vz
-local function throwVelocity(from, to)
-    local dx, dy, dz = to.x - from.x, to.y - from.y, to.z - from.z
-    local d = math.sqrt(dx * dx + dy * dy)
-    if d < 0.05 then return nil end
-    local v, g = THROW_SPEED, THROW_GRAVITY
-    local v2 = v * v
-    local disc = v2 * v2 - g * (g * d * d + 2.0 * dz * v2)
-    if disc < 0.0 then return nil end
-    local tanA = (v2 - math.sqrt(disc)) / (g * d)
-    local cosA = 1.0 / math.sqrt(1.0 + tanA * tanA)
-    local h = v * cosA / d
-    return dx * h, dy * h, v * tanA * cosA
+--- Let a thrown object go: physics on (it flies and bounces), GTA's heavy air drag off, at this velocity, with a
+--- little tumble (THROW_TWIST_*). A player's throw and a script's (throwFor) leave the hand the same way.
+local function letFly(obj, vx, vy, vz)
+    SetEntityDynamic(obj, true)
+    SetEntityCollision(obj, true, true)
+    SetEntityHasGravity(obj, true)
+    ActivatePhysics(obj)
+    SetEntityMaxSpeed(obj, 100.0)
+    SetEntityVelocity(obj, vx, vy, vz)
+    local function twist()
+        local t = THROW_TWIST_MIN + math.random() * (THROW_TWIST_MAX - THROW_TWIST_MIN)
+        return math.random() < 0.5 and -t or t
+    end
+    SetEntityAngularVelocity(obj, twist(), twist(), twist())
 end
 
---- Follow a thrown object to rest. `container`, `slot` and `amount` are where it came from.
+--- How long a thrown object may take to become a networked one. Many in the air at once (a script's spray, the
+--- throw test held down) can leave the game without a network id for it for a moment, or for good.
+local THROW_NET_WAIT_MS = 2000
+
+--- Follow a thrown object to rest. `launch(netId)` tells the server it is in the air: throwLaunched for this
+--- player's own throw, throwForLaunched for a script's. Either way the server answers throwAccepted or
+--- throwRefused. `own`: this player's own throw. This game tells the players nearby (throwStarted), and the throw
+--- never knocks this player down. A script's is told by the server when the launch reaches it, and knocks this player
+--- down like anyone else: they only fly it, they did not throw it. `lost()`, when given, hears that the object never
+--- got a network id: it is deleted here and nothing is launched. `kg`: what it weighs, for whether it knocks over
+--- whoever it hits (hitsHard).
 ---@param obj number  the networked object, already flying
 ---@param launchVel vector3  the velocity it left the hand with
-local function TrackThrow(obj, container, slot, amount, launchVel)
+---@param launch fun(netId: number)
+---@param own boolean
+---@param lost fun()|nil
+---@param kg number|nil
+local function TrackThrow(obj, launchVel, launch, own, lost, kg)
     -- The hit check starts at the hand with the launch speed, so someone a metre or two ahead still counts (throwHitCheck)
     local mn, mx = GetModelDimensions(GetEntityModel(obj))
-    local knock = { hit = {}, pos = GetEntityCoords(obj), vel = launchVel, ahead = KNOCK_AHEAD + #(mx - mn) * 0.5 }
+    local knock = { hit = {}, pos = GetEntityCoords(obj), vel = launchVel, ahead = KNOCK_AHEAD + #(mx - mn) * 0.5,
+        hitsMe = not own, kg = kg }
     CreateThread(function()
         -- The server finds the pile's object by network id; it lands where this game saw it land.
-        local waitUntil = GetGameTimer() + 1000
+        local waitUntil = GetGameTimer() + THROW_NET_WAIT_MS
         while not NetworkGetEntityIsNetworked(obj) and GetGameTimer() < waitUntil do Wait(0) end
+        -- Never networked: no id to name (asking for one warns, and the server refuses a 0). It was never anyone's
+        -- but this game's, so it goes, and the item with it: a player's stays in their pockets, a script's is put down.
+        if not NetworkGetEntityIsNetworked(obj) then
+            if DoesEntityExist(obj) then DeleteEntity(obj) end
+            if lost then lost() end
+            return
+        end
         local netId = NetworkGetNetworkIdFromEntity(obj)
         SetNetworkIdCanMigrate(netId, false)
-        -- Every game nearby: hide GTA's tennis ball and watch this object (watchThrows), at once; the pile below reaches them later.
-        TriggerServerEvent('whip_core:server:throwStarted', netId)
+        -- Every game nearby: hide GTA's tennis ball and watch this object (watchThrows), at once; the pile below reaches
+        -- them later.
+        if own then TriggerServerEvent('whip_core:server:throwStarted', netId) end
+        -- A script's: this player is also watched for it as every other player near is, so a close pass counts the same
+        -- (a straight hit is caught by throwHitCheck)
+        if not own then
+            watched[netId] = { since = GetGameTimer(), thrower = PlayerId(), mine = true, kg = kg }
+            watchThrows()
+        end
         local t = {}
         pendingThrows[netId] = t
-        TriggerServerEvent('whip_core:server:throwLaunched', container, slot, amount, netId)
+        launch(netId)
 
         local started, still = GetGameTimer(), 0
         while true do
@@ -2391,8 +2528,32 @@ local function TrackThrow(obj, container, slot, amount, launchVel)
             end
         end
         pendingThrows[netId] = nil
+        if not own then watched[netId] = nil end
     end)
 end
+
+--- The server asks this game to throw an item for a script (ThrowGroundItem, server/ground.lua), because this
+--- player is near where it is thrown from. Made at `from` and let go at `vel` as this player's own throws are,
+--- then followed to rest the same way. When it cannot be thrown (its model, the object, or a network id for it), this
+--- game says so at once (throwForFailed) and the server puts the item down itself, rather than waiting out the ask.
+--- `kg` is what the pile weighs, as the server weighs it (a bag with what is in it).
+RegisterNetEvent('whip_core:client:throwFor', function(token, itemKey, from, vel, kg)
+    if type(token) ~= 'number' or type(itemKey) ~= 'string' then return end
+    if type(from) ~= 'vector3' or type(vel) ~= 'vector3' then return end
+    kg = tonumber(kg)
+    local function failed(why) TriggerServerEvent('whip_core:server:throwForFailed', token, why) end
+    CreateThread(function()
+        local model = Inventory.loadItemProp(itemKey, 2000)   -- its own, or the box the game would not load its own as
+        if not model then return failed('model') end
+        local obj = CreateObject(model, from.x, from.y, from.z, true, true, false)
+        SetModelAsNoLongerNeeded(model)
+        if not obj or obj == 0 then return failed('object') end
+        letFly(obj, vel.x, vel.y, vel.z)
+        TrackThrow(obj, vel, function(netId)
+            TriggerServerEvent('whip_core:server:throwForLaunched', token, netId)
+        end, false, function() failed('network') end, kg)
+    end)
+end)
 
 --- Give/throw mode tick, per frame while give mode lasts (started by the giveItem callback, ends with a give, throw or cancel).
 local giveThreadRunning = false
@@ -2492,8 +2653,7 @@ local function giveTick()
                 RemoveAllProjectilesOfType(GetHashKey('WEAPON_BALL'), false)
 
                 -- The item's ground prop (requested when give mode started): the pile's model, and what the server checks the flying object against.
-                local modelName = Inventory.itemPropModel(giveItemKey)
-                local model = LoadModel(modelName, 2000)
+                local model = Inventory.loadItemProp(giveItemKey, 2000)
 
                 if model then
                     -- Spawn slightly in front of the player at chest height
@@ -2516,34 +2676,27 @@ local function giveTick()
                     local obj = CreateObject(model, spawnPos.x, spawnPos.y, spawnPos.z, true, true, false)
                     if obj and obj ~= 0 then
                         if handRot then SetEntityRotation(obj, handRot.x, handRot.y, handRot.z, 2, true) end
-                        -- Physics on: it flies and bounces.
-                        SetEntityDynamic(obj, true)
-                        SetEntityCollision(obj, true, true)
-                        SetEntityHasGravity(obj, true)
-                        ActivatePhysics(obj)
-
-                        -- Remove GTA's heavy default air drag.
-                        SetEntityMaxSpeed(obj, 100.0)
 
                         -- Onto the crosshair on an arc at THROW_SPEED. Out of reach (or the sky): straight along the aim with a little loft.
-                        local vx, vy, vz = throwVelocity(spawnPos, targetPoint)
+                        local vx, vy, vz = ThrowAim.arc(spawnPos, targetPoint, THROW_SPEED)
                         -- Never back toward the thrower.
                         if not vx or rayHit ~= 1 or (vx * camFwd.x + vy * camFwd.y) <= 0.0 then
-                            vx, vy, vz = dirX * THROW_SPEED, dirY * THROW_SPEED, dirZ * THROW_SPEED + THROW_LOFT
+                            vx, vy, vz = ThrowAim.straight(spawnPos, spawnPos + vector3(dirX, dirY, dirZ), THROW_SPEED)
                         end
-                        SetEntityVelocity(obj, vx, vy --[[@as number]], vz --[[@as number]])   -- they come with vx
-                        -- A little tumble each time (THROW_TWIST_*).
-                        local function twist()
-                            local t = THROW_TWIST_MIN + math.random() * (THROW_TWIST_MAX - THROW_TWIST_MIN)
-                            return math.random() < 0.5 and -t or t
-                        end
-                        SetEntityAngularVelocity(obj, twist(), twist(), twist())
+                        letFly(obj, vx, vy --[[@as number]], vz --[[@as number]])   -- they come with vx
 
                         -- (Other games hide the ball on throwStarted.)
                         SetModelAsNoLongerNeeded(model)
 
-                        -- It is a ground item now: give mode ends here so the hands are free.
-                        TrackThrow(obj, giveContainer, giveSlot, giveItemAmount, vector3(vx, vy, vz))
+                        -- It is a ground item now: give mode ends here so the hands are free. Where it came from is
+                        -- copied first: CancelGiveMode clears give mode's own before the launch is said.
+                        local container, slot, amount = giveContainer, giveSlot, giveItemAmount
+                        -- What it weighs, for the people of the street it hits (players are told the server's weight)
+                        local def = Config.Items[giveItemKey]
+                        local kg = (type(def) == 'table' and tonumber(def.weight) or 0) * (tonumber(amount) or 1)
+                        TrackThrow(obj, vector3(vx, vy, vz), function(netId)
+                            TriggerServerEvent('whip_core:server:throwLaunched', container, slot, amount, netId)
+                        end, true, function() UI.Notify('The throw was lost', 'error') end, kg)   -- (the item stays)
                         CancelGiveMode()
                     else
                         -- Prop creation failed: raycast fallback.
@@ -2642,15 +2795,18 @@ startGiveTick = function()
 end
 
 --- Another client threw an item: remove the ball projectile so only the item prop shows.
-RegisterNetEvent('whip_core:client:playerThrew', function(throwerServerId, netId)
+RegisterNetEvent('whip_core:client:playerThrew', function(throwerServerId, netId, kg)
     if GetPlayerServerId(PlayerId()) == throwerServerId then return end
     RemoveAllProjectilesOfType(GetHashKey('WEAPON_BALL'), false)
     -- ...and watch what flies (watchThrows).
-    if tonumber(netId) then Inventory.watchThrow(tonumber(netId), throwerServerId) end
+    -- (`kg` comes with a script's throw; a player's own brings it with its pile, groundItemCreated)
+    if tonumber(netId) then Inventory.watchThrow(tonumber(netId), throwerServerId, kg) end
 end)
 
 --- Handoff animation, triggered by the server on giver and receiver. Animation only: the item moves as the server's held prop at the clip's middle.
 RegisterNetEvent('whip_core:client:playGiveAnim', function(otherServerId, isGiver)
+    -- A downed player keeps their pose: the ground death is a looped clip laid once (client/death.lua).
+    if PlayerIsDead then return end
     local ped  = PlayerPedId()
     local dict = 'mp_common'
     local clip = isGiver and 'givetake1_a' or 'givetake1_b'
@@ -2671,7 +2827,7 @@ RegisterNetEvent('whip_core:client:playGiveAnim', function(otherServerId, isGive
 
         -- (The props cross at the clip's middle, on the server's clock.)
         Wait(2000)
-        ClearPedTasks(isGiver and ped or PlayerPedId())
+        StopAnimTask(PlayerPedId(), dict, clip, 1.0)
         RemoveAnimDict(dict)
     else
         RemoveAnimDict(dict)
@@ -2857,6 +3013,8 @@ end
 for i = 1, 5 do
     local cmd = 'hotbar_' .. i
     RegisterCommand(cmd, function()
+        -- Talking to someone: the number picks the answer the dialog shows with it (client/conversations.lua).
+        if Conversations ~= nil and Conversations.answerByNumber(i) then return end
         -- A world key: not under a placement ghost or in give mode, unless the mode lets it through (the camera item).
         if not IsGameInputFree(false, false, true) then return end
         Inventory.useHotbarSlot(i)

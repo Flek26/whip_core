@@ -170,6 +170,7 @@ Config.Items = {
         usable   = false,
         cooldown = 0,
         prop     = 'prop_cs_business_card',
+        wallet   = true,   -- fits in a wallet, and is still found there (HasItem, FindItem)
     },
     cash = {
         name     = 'Cash',
@@ -683,6 +684,13 @@ Config.AtmProps = {
     'prop_fleeca_atm',
 }
 
+-- Cash machines the server should know besides GTA's own (server/atm_positions.lua): those a map mod or an MLO adds,
+-- as vector3 at the machine's base. Only IsNearAtm and GetNearestAtm read them (a resource checking a player stands at
+-- a machine); whip's own ATMs find machines by model, wherever they are.
+Config.AtmExtraPositions = {
+    -- vector3(149.9, -1040.7, 28.4),
+}
+
 -- How far out ATMs are looked for, in metres. Larger than the prompt range so a row of ATMs is found as you walk along it.
 Config.AtmSearchRange = 30.0
 
@@ -952,6 +960,17 @@ Config.Garages = {
 --                         Both can also be set in game by the shop's managers (Edit Shelf).
 Config.Shops = {
 }
+
+-- GTA's own convenience stores as shops: its nine 24/7s and five LTDs (server/gta_stores.lua), each with a keeper behind
+-- the till selling GtaStoreCatalog, a map icon, and the shelf screen, basket and checkout every shop has. Each is made
+-- once and then managed in /whip like any shop. Off unless server.cfg says `set whip_gta_stores true` (WHIP's txAdmin
+-- recipe does, for a new server), so a server that runs its own stores gets no second keeper. Also on /whip >
+-- Settings > World & gameplay: turning it on opens them at once; turning it off makes no more, and deletes none
+-- (delete them in /whip > Economy > Shops: one deleted is not made again).
+Config.GtaStores = GetConvar('whip_gta_stores', 'false') == 'true'
+
+-- What GTA's stores sell, item key = price in cash. A store's own catalog can be changed in /whip after it is made.
+Config.GtaStoreCatalog = { food = 50, drink = 30 }
 
 -- How many lines a shopping basket has (1 to 50). A line is one kind of item, as many as stack in a pocket slot.
 Config.ShopBasketSlots = 10
@@ -1394,16 +1413,24 @@ Config.GroundItemPickupRange = 2.0     -- How close before dropped items show in
 Config.GroundItemStreamRange = 100.0   -- How far away dropped items still appear in the world (door lock changes ride this too: keep it 50 or more)
 Config.PlaceItemRange        = 10.5    -- How far away you can set an item down (metres, from the camera)
 
+-- The box at the side of the screen when a player gets or loses an item (any way: a shop, a job, an admin, a
+-- pick up, another player). `removed` false shows only what they get; `position` is 'right', 'left' or 'bottom'.
+Config.ItemNotices = { enabled = true, removed = true, position = 'right' }
+
 -- How the player moves while holding an item out to give it: `walk` is a /walk name ('trash'), or nil for their own
 -- walk; `speed` is 'jog' (no sprint), 'walk' (no running) or nil (as fast as they like). A resource can set its own
 -- with SetGiveModeStyle. One item can keep the player's own walk: "Allow player walk animation" on its /whip Items page.
 Config.GiveModeStyle = { walk = 'trash', speed = 'jog' }
 
--- A thrown item knocks the person it hits over, and bounces off. Not someone in a no-PvP zone or with god mode on;
--- once up, nobody can be knocked down again for a second and a half.
+-- A thrown item that hits someone hard enough knocks them over, and bounces off: it takes weight and speed together,
+-- so a coin thrown fast does not, and nor does a heavy thing rolling slowly. Not someone in a no-PvP zone or with god
+-- mode on; once up, nobody can be knocked down again for a second and a half.
 Config.ThrowKnockdown = {
     Enabled   = true,
     MinSpeed  = 8.0,    -- m/s it must still be flying at when it hits (it leaves the hand at 18): not one that has bounced or rolls
+    -- How hard: its weight in kg times its speed in m/s. At a normal throw a 1 kg item is about 17 (down) and a
+    -- 0.3 kg sandwich about 5 (not); a handful of cash never is.
+    MinImpact = 8.0,
     RagdollMs = 2500,   -- how long they stay down (milliseconds)
     Npcs      = true,   -- people of the street fall too (false: players only)
 }

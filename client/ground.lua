@@ -558,9 +558,9 @@ local function SpawnGroundProp(data)
         return
     end
 
-    local modelName = Inventory.itemPropModel(data.item)
     spawning[data.id] = true
-    local model = LoadModel(modelName)
+    -- Its own prop, or the box the game would not load its own as (seen, picked up and thrown the same)
+    local model, modelName = Inventory.loadItemProp(data.item)
     spawning[data.id] = nil
     if not model then
         print(('[whip_core:ground] WARNING: Failed to load model %s for item #%d'):format(modelName, data.id))
@@ -789,8 +789,8 @@ RegisterNetEvent('whip_core:client:groundItemCreated', function(data)
     -- A throw's prompt at once: it is in the air for a second or two, and the streaming pass could
     -- leave it unshown for half of one. (A flying pile has no model to load, so this does not wait.)
     if data.flight and inStreamRange(data) then SpawnGroundProp(data) end
-    -- Watched while it flies: thrown hard into this player, it knocks them down (client/inventory.lua)
-    if data.flight then Inventory.watchThrow(data.flight, data.flightBy) end
+    -- Watched while it flies: thrown hard into this player, heavy enough, it knocks them down (client/inventory.lua)
+    if data.flight then Inventory.watchThrow(data.flight, data.flightBy, data.flightKg) end
     if onMyPanel(data) then RefreshNUIGroundItems() end
 end)
 
@@ -880,60 +880,89 @@ local function cellsAround(x, y, range)
     return nearCells
 end
 
-CreateThread(function()
-    local passes = 0
-    while true do
-        -- No ground items known and none drawn: nothing to stream in, out or prune
-        if next(groundItemsData) == nil and next(groundItemProps) == nil then
-            Wait(500)
-            goto continue
-        end
+--- Piles whose prop threw while it was made (not a model the game refused: LoadModel answers that): said once, then
+--- left alone for the session, so one bad pile is not tried and printed twice a second.
+local spawnFailed = {}
 
-        local cost = WhipCost.start()
-        local playerCoords = GetEntityCoords(PlayerPedId())
-        local streamRange = Config.GroundItemStreamRange or 100.0
-        local streamRangeSq = streamRange * streamRange
+--- One pile's prop, its error kept to that pile.
+local function trySpawn(data)
+    local ok, err = pcall(SpawnGroundProp, data)
+    if not ok then
+        spawning[data.id] = nil
+        spawnFailed[data.id] = true
+        print(('^1[whip_core:ground] pile #%s (%s) did not spawn: %s^7'):format(tostring(data.id), tostring(data.item),
+            tostring(err)))
+    end
+end
 
-        passes = passes + 1
-        if passes >= PRUNE_EVERY then
-            passes = 0
-            pruneFarCells(playerCoords, streamRange)
-        end
+local passes = 0
 
-        -- Spawn pass: only check items in nearby cells
-        local nearbyCells = cellsAround(playerCoords.x, playerCoords.y, streamRange)
-        local inRange = {}
+--- One streaming pass: what lies in range gets its prop, what left range loses it, and every PRUNE_EVERY passes the
+--- far cells are forgotten. What to spawn is listed first and made after: a prop's model load waits, and piles
+--- coming and going meanwhile (a throw test makes dozens a second) must not change the cells while they are walked.
+local function streamPass()
+    local playerCoords = GetEntityCoords(PlayerPedId())
+    local streamRange = Config.GroundItemStreamRange or 100.0
+    local streamRangeSq = streamRange * streamRange
 
-        for key in pairs(nearbyCells) do
-            local bucket = clientGrid[key]
-            if bucket then
-                for id in pairs(bucket) do
-                    local data = groundItemsData[id]
-                    if data then
-                        local dx = playerCoords.x - data.x
-                        local dy = playerCoords.y - data.y
-                        local dz = playerCoords.z - data.z
-                        if (dx * dx + dy * dy + dz * dz) <= streamRangeSq then
-                            inRange[id] = true
-                            if not groundItemProps[id] then
-                                SpawnGroundProp(data)
-                            end
-                        end
+    passes = passes + 1
+    if passes >= PRUNE_EVERY then
+        passes = 0
+        pruneFarCells(playerCoords, streamRange)
+    end
+
+    -- Only the items in nearby cells
+    local nearbyCells = cellsAround(playerCoords.x, playerCoords.y, streamRange)
+    local inRange, toSpawn = {}, {}
+    for key in pairs(nearbyCells) do
+        local bucket = clientGrid[key]
+        if bucket then
+            for id in pairs(bucket) do
+                local data = groundItemsData[id]
+                if data then
+                    local dx = playerCoords.x - data.x
+                    local dy = playerCoords.y - data.y
+                    local dz = playerCoords.z - data.z
+                    if (dx * dx + dy * dy + dz * dz) <= streamRangeSq then
+                        inRange[id] = true
+                        if not groundItemProps[id] and not spawnFailed[id] then toSpawn[#toSpawn + 1] = data end
                     end
                 end
             end
         end
+    end
 
-        -- Despawn pass: remove props no longer in range
-        for id in pairs(groundItemProps) do
-            if not inRange[id] then
-                DespawnGroundProp(id)
-            end
+    -- Props no longer in range go
+    for id in pairs(groundItemProps) do
+        if not inRange[id] then
+            DespawnGroundProp(id)
         end
+    end
 
-        WhipCost.stop('ground items: stream in and out (2 a second)', cost)
-        Wait(500)
-        ::continue::
+    -- Then the new ones, each still on the ground as it was when listed (a load before it waited)
+    for _, data in ipairs(toSpawn) do
+        if groundItemsData[data.id] == data and not groundItemProps[data.id] then trySpawn(data) end
+    end
+end
+
+-- The streaming, for the life of the session. Each pass runs under pcall: an error in one (a prop the game threw on)
+-- once ended it for good, and no pile came or went after it.
+CreateThread(function()
+    local lastErr
+    while true do
+        -- No ground items known and none drawn: nothing to stream in, out or prune
+        if next(groundItemsData) == nil and next(groundItemProps) == nil then
+            Wait(500)
+        else
+            local cost = WhipCost.start()
+            local ok, err = pcall(streamPass)
+            if not ok and tostring(err) ~= lastErr then
+                lastErr = tostring(err)
+                print(('^1[whip_core:ground] a streaming pass failed: %s^7'):format(lastErr))
+            end
+            WhipCost.stop('ground items: stream in and out (2 a second)', cost)
+            Wait(500)
+        end
     end
 end)
 

@@ -175,6 +175,14 @@ local MODEL_WHY = 'must be a model name (letters, digits and _)'
 local RESOURCE = '^[%w_%-]+$'
 local RESOURCE_WHY = 'must be a resource name (letters, digits, _ and -)'
 
+--- An ATM can't be used from further out than its prompt shows (both ranges' rule).
+local function atmRangesCross(get)
+    if (get('AtmActiveRange') or 0) > (get('AtmVisibleRange') or 0) then
+        return false, 'an ATM must show its prompt at least as far out as it can be used'
+    end
+    return true
+end
+
 --- The weather list must keep every weather a scene names (the character screen, landing, creator,
 --- the first start's).
 local function weatherListCross(get)
@@ -310,6 +318,20 @@ ConfigSchema = {
             { path = 'BlockOwnCharacterTransfers', type = 'bool', sides = 'server',
               label = 'No money between a player\'s own characters',
               help = 'On: a player cannot send bank money from one of their characters to another of their own characters. Off: they can, like sending it to anyone else.' },
+            -- whip's ATMs (client/atm.lua): which machines have the prompt, and how near. atm.lua finds the machines
+            -- again when any of these change.
+            { path = 'AtmProps', type = 'list', minItems = 0, maxItems = 50,
+              item = { type = 'string', maxLen = 64, pattern = MODEL, patternWhy = MODEL_WHY },
+              label = 'ATM models',
+              help = 'The cash machines whip puts its ATM on, by model name, split by commas: prop_atm_01, prop_atm_02, prop_atm_03, prop_fleeca_atm are GTA\'s own. A machine an MLO adds works once its model is here. Empty: whip\'s ATMs are off, for a server that uses another ATM resource.' },
+            { path = 'AtmVisibleRange', type = 'number', min = 1, max = 30, step = 0.5, unit = 'm',
+              cross = atmRangesCross,
+              label = 'ATM prompt shows from',
+              help = 'How near a player must be for an ATM\'s prompt to appear.' },
+            { path = 'AtmActiveRange', type = 'number', min = 0.5, max = 10, step = 0.1, unit = 'm',
+              cross = atmRangesCross,
+              label = 'ATM usable from',
+              help = 'How near a player must be to use an ATM. No more than where its prompt shows from.' },
             { path = 'DefaultSpawn', type = 'vec4', limits = WORLD, here = true,
               label = 'New character spawn',
               help = 'Where a new character appears when they leave the creator, and the way they face. Characters who have played before come back where they left.' },
@@ -486,6 +508,16 @@ ConfigSchema = {
             { path = 'GroundItemPickupRange', type = 'number', min = 1.5, max = 10, step = 0.5, unit = 'm',
               label = 'Ground pickup range',
               help = 'How close dropped items must be to show in the Ground panel, and the furthest a drop can land.' },
+            { path = 'ItemNotices.enabled', type = 'bool',
+              label = 'Item notices',
+              help = 'On: a box shows at the side of the screen with the item\'s picture and how many, whenever a player gets an item, however it came (a shop, a job, an admin, a pick up, another player).' },
+            { path = 'ItemNotices.removed', type = 'bool', shownWhen = { path = 'ItemNotices.enabled', equals = true },
+              label = 'Notices for items lost',
+              help = 'On: a red box shows when items leave a player\'s inventory too (used, sold, put in a stash, taken). Off: only what they get.' },
+            { path = 'ItemNotices.position', type = 'enum', shownWhen = { path = 'ItemNotices.enabled', equals = true },
+              options = { { value = 'right', label = 'Right side' }, { value = 'left', label = 'Left side' }, { value = 'bottom', label = 'Bottom, above the hotbar' } },
+              label = 'Item notice position',
+              help = 'Where on the screen the item notices show.' },
             { path = 'PlaceItemRange', type = 'number', min = 1, max = 20, step = 0.5, unit = 'm',
               label = 'Placing reach',
               help = 'How far from the camera a player can set an item down.' },
@@ -624,11 +656,15 @@ ConfigSchema = {
               help = 'Weapon names split by commas, such as GADGET_PARACHUTE (to bail out of an aircraft). A misspelt name allows nothing.' },
             { path = 'ThrowKnockdown.Enabled', type = 'bool',
               label = 'Thrown items knock people over',
-              help = 'An item thrown at someone knocks them down, like GTA\'s thrown newspaper, and bounces off them. Not someone in a no-PvP zone or with god mode on.' },
+              help = 'An item thrown hard at someone knocks them down, like GTA\'s thrown newspaper, and bounces off them: a heavy enough item, fast enough. Not someone in a no-PvP zone or with god mode on.' },
             { path = 'ThrowKnockdown.Npcs', type = 'bool',
               shownWhen = { path = 'ThrowKnockdown.Enabled', equals = true },
               label = 'NPCs are knocked over too',
               help = 'Off: only players fall.' },
+            { path = 'ThrowKnockdown.MinImpact', type = 'number', min = 0, max = 100, step = 0.5,
+              shownWhen = { path = 'ThrowKnockdown.Enabled', equals = true },
+              label = 'How hard a hit knocks someone over',
+              help = 'The item\'s weight in kg times its speed in m/s. At a normal throw a 1 kg item is about 17 and a sandwich about 5. Higher: only heavier things knock people over.' },
             { path = 'ActionMode.Disable', type = 'bool',
               label = 'Keep GTA\'s combat stance off',
               help = 'GTA\'s crouched combat walk after firing or being shot at. On keeps it off, every frame.' },
@@ -643,6 +679,10 @@ ConfigSchema = {
             { path = 'ShopTalk.enabled', type = 'bool', sides = 'server',
               label = 'Shop talk',
               help = 'At a shop, the shopper says what they are doing in a /me bubble ("I\'ll take x3 Water") and the shopkeeper answers. The lines are in config.lua.' },
+            -- server/shops.lua seedGtaStores: on makes GTA's stores never made before; off deletes none.
+            { path = 'GtaStores', type = 'bool', sides = 'server',
+              label = 'GTA\'s own stores',
+              help = 'GTA\'s nine 24/7s and five LTDs as shops: a keeper behind the till, a map icon, and the shelf screen. Turning it on opens them now; turning it off makes no more but deletes none (delete them in Economy > Shops: a deleted one is not made again). Leave it off if another resource runs your stores, or each would get a second keeper.' },
             -- Live: every shop's prompt takes it at once (server/shop_counters.lua).
             { path = 'ShopInteractRange', type = 'number', min = 1, max = 15, step = 0.5, unit = 'm',
               label = 'Shop reach',
