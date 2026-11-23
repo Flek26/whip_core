@@ -38,11 +38,13 @@ local function printValues()
     if not e or not DoesEntityExist(e.entity) then finish() return end
     local offset, heading, visual = values(e)
     local fields = ('offset = vector3(%.4f, %.4f, %.4f)'):format(offset.x, offset.y, offset.z)
-    fields = fields .. (', visualOffset = vector3(%.4f, %.4f, %.4f), radius = %.2f'):format(visual.x, visual.y, visual.z, e.radius)
+    fields = fields .. (', visualOffset = vector3(%.4f, %.4f, %.4f)'):format(visual.x, visual.y, visual.z)
     fields = fields .. (e.billboard and ', heading = false' or (', heading = %.2f'):format(heading))
     local key = e.name ~= '' and ('[%q]'):format(e.name) or ('[%d]'):format(e.model)
-    local text = ('WHIP action:\nat = { entity = entity, %s }\n\n'
-        .. 'Entry in Config.PropPromptDefaultOffset:\n%s = { %s },'):format(fields, key, fields)
+    -- The radius goes in the action only: in a model's default it would make every prompt on that model need a
+    -- precise aim, a shop's or a fuel pump's too.
+    local text = ('WHIP action:\nat = { entity = entity, %s, radius = %.2f }\n\n'
+        .. 'Entry in Config.PropPromptDefaultOffset:\n%s = { %s },'):format(fields, e.radius, key, fields)
     print('[whip_core:promptoffset]\n' .. text)
     finish()
 end
