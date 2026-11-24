@@ -210,6 +210,8 @@ function PropCatalog.seedFromConfig()
     print(('[whip_core:props] seeded %d new prop(s), named %d'):format(added, named))
 end
 
+local syncing = false   -- syncImages is running (it waits between batches)
+
 --- Make every row's picture flag match the disk: img/props/<model>.webp in its media pack there and
 --- not empty means it has a picture.
 ---
@@ -221,21 +223,23 @@ end
 --- Opened, never read — one open and seek per catalog row, so a thousand icons cost a thousand
 --- opens at boot rather than a thousand files loaded into memory. Runs after loadAll and the seed.
 ---
---- NO PROPS' MEDIA PACK, NO SYNC. Without its folder every picture in it would read as missing, and
---- the flags of all of them would be switched off, to come back one by one only after the folder is
---- restored and whip_core restarted. So a server without it keeps the flags as they are and says why.
+--- WITHOUT THE PROPS' MEDIA PACK, WHIP'S CDN SAYS (server/media.lua): its list of pictures, read at start.
+--- NO PACK AND NO CDN, NO SYNC. Every picture would read as missing, and the flags of all of them would be
+--- switched off, to come back one by one only after the folder is restored and whip_core restarted. So a server
+--- with neither keeps the flags as they are and says why.
 --- The folders are read whether or not their resources have started yet (start order does not matter); one
 --- missing or never started is the setup report's to say (server/setup_report.lua).
-function PropCatalog.syncImages()
+local function syncNow()
+    WhipMedia.firstRead()
     local roots = {}
     for _, res in ipairs(WhipAssets.resources()) do
         local root = GetResourceState(res) ~= 'missing' and GetResourcePath(res) or nil
         if root and root ~= '' then roots[res] = root end
     end
     for _, c in ipairs(WhipAssets.chunks) do
-        if c.dir .. '/' == IMG_DIR and not roots[c.resource] then
-            print(('[whip_core:props] WARNING: no %s, so the furniture catalog has no pictures. Picture flags were'
-                .. ' left as they were.'):format(c.resource))
+        if c.dir .. '/' == IMG_DIR and not roots[c.resource] and not WhipMedia.version(c.resource) then
+            print(('[whip_core:props] WARNING: no %s, nor the CDN (Config.MediaBase), so the furniture catalog has'
+                .. ' no pictures. Picture flags were left as they were.'):format(c.resource))
             return
         end
     end
@@ -258,6 +262,8 @@ function PropCatalog.syncImages()
             onDisk = (f:seek('end') or 0) > 0
             f:close()
         end
+        -- Not in its pack (none installed, or one older than whip_core): the CDN's, if it has it
+        if row and not onDisk then onDisk = WhipMedia.onCdn(path) end
         if row and onDisk ~= hasImage(row) then
             if onDisk then gained[#gained + 1] = model else lost[#lost + 1] = model end
         end
@@ -284,9 +290,22 @@ function PropCatalog.syncImages()
     end
 
     if #gained > 0 or #lost > 0 then
-        print(('[whip_core:props] pictures: %d found on disk, %d missing from disk'):format(#gained, #lost))
+        print(('[whip_core:props] pictures: %d found, %d missing'):format(#gained, #lost))
     end
 end
+
+function PropCatalog.syncImages()
+    syncing = true
+    local ok, err = pcall(syncNow)
+    syncing = false
+    if not ok then print(('[whip_core:props] ERROR syncing picture flags: %s'):format(tostring(err))) end
+end
+
+-- The CDN's list of pictures changed (a picture pack's release): look again, once a look under way has ended.
+WhipMedia.onChange(function()
+    while syncing do Wait(100) end
+    PropCatalog.syncImages()
+end)
 
 -- ============================================
 -- Telling the clients

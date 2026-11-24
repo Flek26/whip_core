@@ -1104,6 +1104,10 @@ Config.InteractCameraWeight = 0.4
 -- Doors only exist in 'world'. Swap live with /interactrenderer to compare.
 Config.InteractRenderer = 'world'
 
+Config.PropPromptDefaultOffset = {
+    -- ['sf_prop_impact_driver_01a'] = { offset = vector3(0.0, 0.0, 0.5563), heading = false },
+}
+
 -- Settings for the 'world' renderer only.
 Config.Interact3D = {
     -- The badge's height on screen, in pixels, at InteractActiveRange; its size in metres follows from the real FOV
@@ -1813,6 +1817,12 @@ Config.Experimental = {
 
 
 -- 13. Advanced: you should not normally need to touch these.
+
+-- Where WHIP's pictures and videos come from when their media pack is not installed: WHIP's CDN, which serves the
+-- picture packs (both clothing packs, props, and the vehicle, NPC, tattoo and emote previews) and says which
+-- pictures there are. A pack in the resources folder and started serves its own, so downloading the packs is the
+-- way to run without the CDN. '' turns it off: then only the installed packs have pictures.
+Config.MediaBase = 'https://media.whipfx.net'
 
 -- UI theme: name a resource here and the NUI loads its `theme.css` over the base look. A theme overrides the design
 -- tokens in html/css/base.css (docs/nui-theming.md) and ships as its own resource, so it survives whip_core updates.

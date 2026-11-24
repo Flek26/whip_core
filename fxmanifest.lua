@@ -3,8 +3,8 @@ game 'gta5'
 
 name 'whip_core'
 author 'Whippy'
-description 'Custom FiveM framework — Beta 1.3.0'
-version '1.3.0'   -- the start-up banner reads it
+description 'Custom FiveM framework — Beta 1.4.1'
+version '1.4.1'   -- the start-up banner reads it
 -- Where its releases are: the update check (server/updates.lua) compares the latest one with `version`.
 whip_updates 'WHIPFX/whip_core'
 
@@ -49,6 +49,7 @@ shared_script 'shared/gta_weapon_models.lua'
 shared_script 'shared/weapon_catalog.lua'
 shared_script 'shared/tattoo_list.lua'
 shared_script 'shared/hair_fades.lua'
+shared_script 'shared/hair_decor.lua'
 shared_script 'shared/interact_spec.lua'
 shared_script 'shared/cam_math.lua'
 shared_script 'shared/cam_sequence.lua'
@@ -106,6 +107,8 @@ server_scripts {
     'server/containers.lua',
     -- Before server/items/*.lua: wallet and duffle_bag call RegisterPanelItem.
     'server/panels.lua',
+    -- Before the catalogs: where each media pack's pictures come from (WHIP's CDN when it isn't installed).
+    'server/media.lua',
     -- The built-in list first: prop_catalog.lua seeds its table from it.
     'server/prop_catalog_seed.lua',
     'server/prop_catalog_seed_world.lua',
@@ -346,6 +349,7 @@ client_scripts {
     'client/director_spots.lua',
     -- After world_quad.lua.
     'client/director_talk.lua',
+    'client/prompt_offset.lua',
     -- Before atm.lua: it calls PropPrompts.define at file scope.
     'client/prop_prompts.lua',
     'client/atm.lua',
@@ -435,6 +439,7 @@ client_scripts {
     'tools/ov_move.lua',
     'tools/place_point.lua',   -- the settings page's Place (client/place_point.lua's PlacePoint)
     'tools/hand_edit.lua',
+    'tools/prompt_offset.lua',
     -- Before every tool that shows it.
     'tools/editor_hud.lua',
     -- Before the wizard, which calls it at runtime.

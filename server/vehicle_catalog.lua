@@ -96,9 +96,13 @@ local function addFromList()
     return added
 end
 
---- Mark each row with whether its picture is on disk. Opened, never read.
+local finding = false   -- findPictures is running (it waits between batches)
+
+--- Mark each row with whether it has a picture: on disk in its media pack when that is installed (opened, never
+--- read), else on WHIP's CDN (server/media.lua).
 ---@return number pictured
-local function findPictures()
+local function findNow()
+    WhipMedia.firstRead()
     local roots = {}
     for _, res in ipairs(WhipAssets.resources()) do
         local root = GetResourceState(res) ~= 'missing' and GetResourcePath(res) or nil
@@ -114,23 +118,35 @@ local function findPictures()
         local path = IMG_DIR .. model .. IMG_EXT
         local res = WhipAssets.resourceFor(path)
         local root = res and roots[res]
-        if res and not root then noPack = res end
+        if res and not root and not WhipMedia.version(res) then noPack = res end
         local f = row and root and io.open(root .. '/' .. path, 'rb')
-        local onDisk = false
+        local onDisk, onCdn = false, false
         if f then
             onDisk = (f:seek('end') or 0) > 0
             f:close()
         end
+        if not onDisk and res then onCdn = WhipMedia.onCdn(path) end
         if row then
-            row.hasImage = onDisk
-            if onDisk then pictured = pictured + 1 end
+            row.hasImage = onDisk or onCdn
+            -- Its pack is installed but hasn't got it: its address is the CDN's (imageUrl), as another resource's
+            -- page has no fallback of its own
+            row.cdnImage = root ~= nil and not onDisk and onCdn or nil
+            if row.hasImage then pictured = pictured + 1 end
         end
     end
     if noPack then
-        print(('^3[whip_core:vehicles] WARNING: there is no %s, so no car has a picture and the dealership has nothing'
-            .. ' to sell^0'):format(noPack))
+        print(('^3[whip_core:vehicles] WARNING: there is no %s, nor the CDN (Config.MediaBase), so no car has a'
+            .. ' picture and the dealership has nothing to sell^0'):format(noPack))
     end
     return pictured
+end
+
+local function findPictures()
+    finding = true
+    local ok, res = pcall(findNow)
+    finding = false
+    if not ok then print(('[whip_core:vehicles] ERROR finding pictures: %s'):format(tostring(res))) return 0 end
+    return res
 end
 
 --- Read the table, add the list, find the pictures. false: the read failed, and start-up halts (player_lifecycle.lua).
@@ -152,6 +168,12 @@ function VehicleCatalog.loadAll()
     return true
 end
 
+-- The CDN's list of pictures changed (a picture pack's release): look again, once a look under way has ended.
+WhipMedia.onChange(function()
+    while finding do Wait(100) end
+    findPictures()
+end)
+
 -- ============================================
 -- Exports
 -- ============================================
@@ -161,6 +183,8 @@ end
 ---@param key string  lower-case model
 ---@return string|false
 local function imageUrl(key)
+    local row = VehicleCatalog.rows[key]
+    if row and row.cdnImage then return WhipAssets.cdnUrl(IMG_DIR .. key .. IMG_EXT) or false end
     return WhipAssets.url(IMG_DIR .. key .. IMG_EXT) or false
 end
 
